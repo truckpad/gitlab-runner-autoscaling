@@ -1,0 +1,66 @@
+{
+    "variables": {
+        "aws_access_key": "",
+        "aws_secret_key": "",
+        "aws_region": "us-west-2",
+        "aws_source_ami": "ami-51537029",
+        "gitlab_token": "",
+        "gitlab_url": "https://gitlab.com/"
+    },
+    "builders": [
+        {
+            "type": "amazon-ebs",
+            "access_key": "{{user `aws_access_key`}}",
+            "secret_key": "{{user `aws_secret_key`}}",
+            "region": "{{user `aws_region`}}",
+            "source_ami": "{{user `aws_source_ami`}}",
+            "instance_type": "t2.micro",
+            "ssh_username": "ubuntu",
+            "ami_name": "gitlab-runner-{{timestamp}}",
+            "ami_description": "GitLab Runner",
+            "ami_block_device_mappings": [{
+                "device_name": "/dev/sda1",
+                "delete_on_termination": true,
+                "volume_size": 80,
+                "volume_type": "gp2"
+            }]
+        }
+    ],
+    "provisioners": [
+        {
+            "type": "file",
+            "source": "config/config.toml",
+            "destination": "/tmp/config.toml"
+        },{
+            "type": "file",
+            "source": "scripts/unregister.sh",
+            "destination": "/tmp/unregister.sh"
+        },{
+            "type": "shell",
+            "environment_vars": "DEBIAN_FRONTEND=noninteractive",
+            "execute_command": "sudo sh -c '{{ .Vars }} {{ .Path }}'",
+            "inline": [
+                "printf \"\n### Configuring Docker...\"",
+                "curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo apt-key add -",
+                "add-apt-repository \"deb [arch=amd64] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable\"",
+
+                "printf \"\n### Configuring GitLab Runner...\"",
+                "curl -L https://packages.gitlab.com/install/repositories/runner/gitlab-runner/script.deb.sh | sudo bash",
+
+                "printf \"\n### Updating OS and installing packages...\"",
+                "apt-get update -y && apt-get dist-upgrade -y",
+                "apt-get install -y awscli docker-ce gitlab-runner htop iftop iotop jq language-pack-pt",
+
+                "printf \"\n### Configuring users and groups\"",
+                "usermod -aG docker gitlab-runner",
+
+                "printf \"\n### Moving config files and shell scripts\"",
+                "mv /tmp/config.toml /etc/gitlab-runner",
+                "mv /tmp/unregister.sh /etc/rc0.d/K02-gitlab-runner.unregister.sh",
+                "chmod +x /etc/rc0.d/K02-gitlab-runner.unregister.sh",
+
+                "printf \"\n### DONE! ###\""
+            ]
+        }
+    ]
+}

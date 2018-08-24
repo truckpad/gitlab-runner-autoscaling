@@ -1,0 +1,299 @@
+Description: >
+
+    This template deploys a highly available GitLab Runner
+
+    Last Modified: August 23 2018
+    Authors:
+        - Marcos Araujo Sobrinho <marcos.sobrinho@truckpad.com.br>
+
+
+Parameters:
+
+    S3Repo:
+        Description: S3 Repository used for Runners Cache
+        Type: String
+
+    MinCapacity:
+        Description: Minimum amount of GitLab Runners to run
+        Type: Number
+        Default: 1
+
+    DesiredCount:
+        Description: Amount of GitLab Runners to run when redeploying this service
+        Type: Number
+        Default: 1
+
+    MaxCapacity:
+        Description: Maximum amount of GitLab Runners copies to run
+        Type: Number
+        Default: 4
+
+    KeyName:
+        Description: Name of an existing EC2 KeyPair to enable SSH access to the Runner
+        Type: AWS::EC2::KeyPair::KeyName
+
+    InstanceType:
+        Description: Instance type to use
+        Type: String
+        Default: t2.medium
+        AllowedValues: [t2.medium, t2.large, t2.xlarge, t3.medium, t3.large, t3.xlarge]
+
+    AMIBaseId:
+        Description: The AWS AMI base to use
+        Type: AWS::EC2::Image::Id
+        Default: ''
+
+    GitLabUrl:
+        Description: GitLab installation URL
+        Type: String
+
+        Default: 'https://gitlab.com/'
+    GitLabToken:
+        Description: GitLab Registration Token
+        Type: String
+
+    VPC:
+        Description: Choose which VPC this GitLab Runner cluster should be deployed to
+        Type: AWS::EC2::VPC::Id
+    
+    Subnets:
+        Description: Choose which subnets this GitLab Runner cluster should be deployed to
+        Type: List<AWS::EC2::Subnet::Id>
+
+Resources:
+
+    GitLabRunnerCacheS3Bucket:
+        Type: AWS::S3::Bucket
+        Properties:
+            BucketName: !Ref S3Repo
+            AccessControl: BucketOwnerFullControl
+            Tags:
+              - Key: "Environment"
+                Value: "development"
+              - Key: "Project"
+                Value: "gitlab-runner"
+            VersioningConfiguration:
+                Status: Suspended
+            LifecycleConfiguration:
+                Rules:
+                  - Id: ExpirationRule
+                    Status: Enabled
+                    ExpirationInDays: '120'
+                    Transitions:
+                      - TransitionInDays: '30'
+                        StorageClass: STANDARD_IA
+
+    GitLabRunnerRole:
+        Type: AWS::IAM::Role
+        Properties:
+            AssumeRolePolicyDocument: 
+                Version: "2012-10-17"
+                Statement: 
+                  - Effect: "Allow"
+                    Principal: 
+                        Service: 
+                          - "ec2.amazonaws.com"
+                    Action: 
+                      - "sts:AssumeRole"        
+            Policies:
+              - PolicyName: "GitLabRunner-S3-Access"
+                PolicyDocument:
+                    Version: "2012-10-17"
+                    Statement: 
+                      - Effect: "Allow"
+                        Action: 
+                          - "s3:*"
+                        Resource: !Sub "arn:aws:s3:::${S3Repo}"
+            Path: "/dev/build/"
+            RoleName: "GitLabRunner-S3-Cache"
+
+
+    GitLabRunnerInstanceProfile:
+        Type: AWS::IAM::InstanceProfile
+        DependsOn:
+          - GitLabRunnerRole
+        Properties: 
+            Path: "/dev/build/"
+            Roles:
+              - !Ref GitLabRunnerRole
+            InstanceProfileName: "GitLabRunner-With-S3-Cache"
+
+
+    GitlabRunnerIamUser:
+        Type: AWS::IAM::User
+        Properties:
+            Policies:
+              - PolicyName: "GitLabRunner-S3-Access"
+                PolicyDocument:
+                    Version: "2012-10-17"
+                    Statement: 
+                      - Effect: "Allow"
+                        Action: 
+                          - "s3:*"
+                        Resource: !Sub "arn:aws:s3:::${S3Repo}"
+            UserName: gitlab-runner
+
+
+    GitlabRunnerIamAccessKey:
+        Type: AWS::IAM::AccessKey
+        DependsOn: [ GitlabRunnerIamUser ]
+        Properties:
+            Serial: 0
+            Status: Active
+            UserName: gitlab-runner
+
+
+    GitLabRunnerSecurityGroup:
+        Type: AWS::EC2::SecurityGroup
+        Properties: 
+            VpcId: !Ref VPC
+            GroupDescription: GitLab Runner network access
+            SecurityGroupIngress:
+              - CidrIp: 0.0.0.0/0
+                FromPort: '22'
+                ToPort: '22'
+                IpProtocol: tcp
+            Tags: 
+              - Key: Name
+                Value: "dev-gitlab-runner"
+              - Key: "Environment"
+                Value: "development"
+              - Key: "Project"
+                Value: "gitlab-runner"
+
+    GitLabRunnerFleet:
+        Type: AWS::EC2::SpotFleet
+        DependsOn:
+          - GitLabRunnerCacheS3Bucket
+          - GitLabRunnerInstanceProfile
+          - GitLabRunnerSecurityGroup
+          - GitlabRunnerIamAccessKey
+        Properties: 
+            SpotFleetRequestConfigData:
+                AllocationStrategy: lowestPrice
+                IamFleetRole: !Sub "arn:aws:iam::${AWS::AccountId}:role/aws-ec2-spot-fleet-tagging-role"
+                LaunchSpecifications:
+                  - EbsOptimized: False
+                    IamInstanceProfile:
+                        Arn: !GetAtt GitLabRunnerInstanceProfile.Arn                      
+                    ImageId: !Ref AMIBaseId
+                    SubnetId: !Select [ 0, !Ref Subnets ]
+                    SecurityGroups:
+                      - GroupId: !GetAtt GitLabRunnerSecurityGroup.GroupId                        
+                    InstanceType: !Ref InstanceType
+                    KeyName: !Ref KeyName
+                    Monitoring:
+                      Enabled: True
+                    TagSpecifications:
+                      - ResourceType: "instance"
+                        Tags:
+                          - Key: "Name"
+                            Value: "dev-gitlab-runner"
+                          - Key: "Environment"
+                            Value: "development"
+                          - Key: "Project"
+                            Value: "gitlab-runner"
+                    UserData:
+                      Fn::Base64: !Sub |
+                          #!/bin/sh
+                          gitlab-runner register -n \
+                              -u ${GitLabUrl} \
+                              -r ${GitLabToken} \
+                              --maximum-timeout 10800 \
+                              --request-concurrency 4 \
+                              --executor docker \
+                              --docker-image python:3.7 \
+                              --docker-cpus 2 \
+                              --docker-privileged \
+                              --cache-type s3 \
+                              --cache-s3-bucket-name ${S3Repo} \
+                              --cache-s3-bucket-location us-west-2 \
+                              --cache-s3-server-address s3.amazonaws.com \
+                              --cache-s3-access-key ${GitlabRunnerIamAccessKey} \
+                              --cache-s3-secret-key ${GitlabRunnerIamAccessKey.SecretAccessKey} \
+                              --cache-cache-shared
+                ReplaceUnhealthyInstances: True
+                SpotPrice: "0.2"
+                TargetCapacity: !Ref DesiredCount
+                TerminateInstancesWithExpiration: False
+                Type: maintain
+
+    ScalableTarget:
+        Type: AWS::ApplicationAutoScaling::ScalableTarget
+        DependsOn:
+          - GitLabRunnerFleet
+        Properties:
+            MinCapacity: !Ref MinCapacity
+            MaxCapacity: !Ref MaxCapacity
+            ResourceId: !Sub 'spot-fleet-request/${GitLabRunnerFleet}'
+            RoleARN: !Sub 'arn:aws:iam::${AWS::AccountId}:role/ecsAutoscaleRole'
+            ScalableDimension: ec2:spot-fleet-request:TargetCapacity
+            ServiceNamespace: ec2
+
+    ScaleDownPolicy:
+        Type: AWS::ApplicationAutoScaling::ScalingPolicy
+        Properties: 
+            PolicyName: GitLabRunner-ScaleDownPolicy
+            PolicyType: StepScaling
+            ScalingTargetId: !Ref ScalableTarget
+            StepScalingPolicyConfiguration:
+                AdjustmentType: ChangeInCapacity
+                Cooldown: 7200
+                MetricAggregationType: Average
+                StepAdjustments:
+                  - MetricIntervalLowerBound: -5
+                    MetricIntervalUpperBound: 0
+                    ScalingAdjustment: -1
+                  - MetricIntervalLowerBound: ''
+                    MetricIntervalUpperBound: -5
+                    ScalingAdjustment: -2
+
+    ScaleUpPolicy:
+        Type: AWS::ApplicationAutoScaling::ScalingPolicy
+        Properties: 
+            PolicyName: GitLabRunner-ScaleUpPolicy
+            PolicyType: StepScaling
+            ScalingTargetId: !Ref ScalableTarget
+            StepScalingPolicyConfiguration:
+                AdjustmentType: ChangeInCapacity
+                Cooldown: 1200
+                MetricAggregationType: Average
+                StepAdjustments:
+                  - MetricIntervalLowerBound: 0
+                    ScalingAdjustment: 1
+
+    CPUReservedTooLowAlarm:
+        Type: AWS::CloudWatch::Alarm
+        Properties:
+            AlarmName: 'GitLab Runner Reserved CPU too low'
+            AlarmDescription: 'Alarm if GitLab Runner have too little CPU reserved'
+            Namespace: AWS/EC2Spot
+            MetricName: CPUUtilization
+            Dimensions:
+              - Name: FleetRequestId
+                Value: !Ref GitLabRunnerFleet
+            Statistic: Average
+            Period: 600
+            EvaluationPeriods: 3
+            Threshold: 15
+            ComparisonOperator: LessThanThreshold
+            AlarmActions:
+              - !Ref ScaleDownPolicy
+
+    CPUReservedTooHighAlarm:
+        Type: AWS::CloudWatch::Alarm
+        Properties:
+            AlarmName: 'GitLab Runner Reserved CPU too high'
+            AlarmDescription: 'Alarm if GitLab Runner have too much CPU reserved'
+            Namespace: AWS/EC2Spot
+            MetricName: CPUUtilization
+            Dimensions:
+              - Name: FleetRequestId
+                Value: !Ref GitLabRunnerFleet
+            Statistic: Average
+            Period: 120
+            EvaluationPeriods: 3
+            Threshold: 50
+            ComparisonOperator: GreaterThanOrEqualToThreshold
+            AlarmActions:
+              - !Ref ScaleUpPolicy
