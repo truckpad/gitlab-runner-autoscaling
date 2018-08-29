@@ -270,15 +270,15 @@ Resources:
             Namespace: AWS/EC2Spot
             MetricName: CPUUtilization
             Dimensions:
-              - Name: FleetRequestId
-                Value: !Ref GitLabRunnerFleet
+                - Name: FleetRequestId
+                  Value: !Ref GitLabRunnerFleet
             Statistic: Average
-            Period: 600
-            EvaluationPeriods: 3
+            Period: 60
+            EvaluationPeriods: 60
             Threshold: 15
             ComparisonOperator: LessThanThreshold
             AlarmActions:
-              - !Ref ScaleDownPolicy
+                - !Ref ScaleDownPolicy
 
     CPUReservedTooHighAlarm:
         Type: AWS::CloudWatch::Alarm
@@ -288,12 +288,12 @@ Resources:
             Namespace: AWS/EC2Spot
             MetricName: CPUUtilization
             Dimensions:
-              - Name: FleetRequestId
-                Value: !Ref GitLabRunnerFleet
+                - Name: FleetRequestId
+                  Value: !Ref GitLabRunnerFleet
             Statistic: Average
-            Period: 120
+            Period: 60
             EvaluationPeriods: 3
             Threshold: 50
             ComparisonOperator: GreaterThanOrEqualToThreshold
             AlarmActions:
-              - !Ref ScaleUpPolicy
+                - !Ref ScaleUpPolicy
